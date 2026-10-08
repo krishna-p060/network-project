@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""bcurl: fetch files over BHTTP/1 (see SPEC.md).
+
+Usage: ./bcurl [-v] host:port/path [host:port/path ...]
+
+Every URL is fetched over one TCP connection. Bodies go to stdout; with -v,
+every frame sent and received is hexdumped to stderr.
+
+Exit status: 0 success, 1 usage or connection error, 2 protocol error,
+4 if any response was 4xx, 5 if any was 5xx.
+"""
+
+import argparse
+import socket
+import sys
+from urllib.parse import quote, urlsplit
+
+import bproto
+from bproto import DATA, END_STREAM, GOAWAY, HEADERS, Frame
+
+USER_AGENT = "bcurl/1.0"
+DEFAULT_PORT = 9000
+TIMEOUT = 10
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_PROTOCOL = 2
+
+
+class Failure(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def protocol_error(message):
+    return Failure(EXIT_PROTOCOL, message)
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_ERROR, f"{self.prog}: error: {message}\n")
+
+
+def parse_url(url):
+    """Split 'host:port/path' (a scheme is optional) into (host, port, authority, path)."""
+    parts = urlsplit(url if "://" in url else "//" + url)
+    try:
+        port = parts.port or DEFAULT_PORT
+    except ValueError:
+        raise Failure(EXIT_ERROR, f"bad port in {url!r}") from None
+    if not parts.hostname:
+        raise Failure(EXIT_ERROR, f"no host in {url!r}")
+    path = quote(parts.path or "/", safe="/%:@!$&'()*+,;=~")
+    if parts.query:
+        path += "?" + parts.query
+    return parts.hostname, port, parts.netloc, path
+
+
+def is_digits(text):
+    return text.isascii() and text.isdigit()
+
+
+def parse_status(headers):
+    """Return (status, content_length) from response headers."""
+    statuses = [value for name, value in headers if name == ":status"]
+    if len(statuses) != 1 or len(statuses[0]) != 3 or not is_digits(statuses[0]):
+        raise protocol_error(f"response needs exactly one 3-digit :status, got {statuses}")
+    status = int(statuses[0])
+    if not 100 <= status <= 599:
+        raise protocol_error(f"status {status} is out of range")
+    for name, _ in headers:
+        if name.startswith(":") and name != ":status":
+            raise protocol_error(f"{name} is not allowed in a response")
+    lengths = [value for name, value in headers if name == "content-length"]
+    if len(lengths) > 1 or (lengths and not is_digits(lengths[0])):
+        raise protocol_error(f"bad content-length {lengths}")
+    return status, int(lengths[0]) if lengths else None
+
+
+class Trace:
+    """The -v output: a summary line, decoded headers and a hexdump per frame."""
+
+    def __init__(self, enabled):
+        self.enabled = enabled
+
+    def note(self, text):
+        if self.enabled:
+            print(f"* {text}", file=sys.stderr, flush=True)
+
+    def frame(self, arrow, frame, headers=(), note=""):
+        if not self.enabled:
+            return
+        summary = f"{arrow} {bproto.describe_frame(frame)}"
+        if note:
+            summary += f"  ({note})"
+        lines = [summary]
+        lines += [f"{arrow}   {name}: {value}" for name, value in headers]
+        lines.append(bproto.hexdump(bproto.encode_frame(frame), prefix=f"{arrow}   "))
+        print("\n".join(lines), file=sys.stderr, flush=True)
+
+
+def fetch(sock, stream_id, authority, path, out, trace):
+    """Send one GET on stream_id, copy the body to out, and return the status."""
+    request = [
+        (":method", "GET"),
+        (":path", path),
+        ("host", authority),
+        ("user-agent", USER_AGENT),
+        ("accept", "*/*"),
+    ]
+    frame = Frame(HEADERS, END_STREAM, stream_id, bproto.encode_headers(request))
+    trace.frame(">", frame, request)
+    sock.sendall(bproto.encode_frame(frame))
+
+    status = length = None
+    received = 0
+    while True:
+        frame = bproto.read_frame(sock)
+        if frame is None:
+            raise protocol_error("server closed the connection before the response was complete")
+        if frame.type == GOAWAY:
+            trace.frame("<", frame)
+            raise protocol_error(f"server sent GOAWAY: {frame.payload.decode('utf-8', 'replace')}")
+        if frame.type not in (HEADERS, DATA):
+            trace.frame("<", frame, note="unknown type, skipped")
+            continue
+        if frame.stream_id != stream_id:
+            trace.frame("<", frame)
+            raise protocol_error(f"got a frame for stream {frame.stream_id} while waiting for stream {stream_id}")
+        if frame.type == HEADERS:
+            try:
+                headers = bproto.decode_headers(frame.payload)
+            except bproto.MalformedHeaders as e:
+                trace.frame("<", frame)
+                raise protocol_error(str(e)) from None
+            trace.frame("<", frame, headers)
+            if status is not None:
+                raise protocol_error("second HEADERS frame in one response")
+            status, length = parse_status(headers)
+        else:
+            trace.frame("<", frame)
+            if status is None:
+                raise protocol_error("DATA frame before HEADERS")
+            out.write(frame.payload)
+            received += len(frame.payload)
+        if frame.end_stream:
+            break
+    out.flush()
+    if length is not None and received != length:
+        raise protocol_error(f"content-length is {length} but the body was {received} bytes")
+    return status
+
+
+def main(argv=None):
+    parser = ArgumentParser(
+        prog="bcurl",
+        description="Fetch files over BHTTP/1 (see SPEC.md). All URLs share one connection.",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="hexdump every frame sent and received to stderr")
+    parser.add_argument("urls", nargs="+", metavar="host:port/path")
+    args = parser.parse_args(argv)
+    trace = Trace(args.verbose)
+    out = sys.stdout.buffer
+    try:
+        targets = [parse_url(url) for url in args.urls]
+        host, port = targets[0][:2]
+        if any(target[:2] != (host, port) for target in targets):
+            raise Failure(EXIT_ERROR, "all URLs must use the same host:port; bcurl never opens a second connection")
+        if len(targets) > 0xFFFF:
+            raise Failure(EXIT_ERROR, "at most 65535 URLs fit on one connection")
+        try:
+            sock = socket.create_connection((host, port), timeout=TIMEOUT)
+        except OSError as e:
+            raise Failure(EXIT_ERROR, f"cannot connect to {host}:{port}: {e}") from None
+        worst = EXIT_OK
+        with sock:
+            trace.note(f"connected to {host}:{port} ({sock.getpeername()[0]})")
+            for stream_id, (_, _, authority, path) in enumerate(targets, start=1):
+                status = fetch(sock, stream_id, authority, path, out, trace)
+                if status >= 400:
+                    print(f"bcurl: {authority}{path}: {status}", file=sys.stderr)
+                    worst = max(worst, status // 100)
+        trace.note("connection closed")
+        return worst
+    except Failure as e:
+        message, code = str(e), e.code
+    except bproto.ProtocolError as e:
+        message, code = str(e), EXIT_PROTOCOL
+    except TimeoutError:
+        message, code = f"no answer from the server within {TIMEOUT} seconds", EXIT_ERROR
+    except OSError as e:
+        message, code = str(e), EXIT_ERROR
+    print(f"bcurl: {message}", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

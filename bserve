@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""bserve: serve a directory over BHTTP/1 (see SPEC.md).
+
+Usage: ./bserve ./www 9000
+"""
+
+import argparse
+import email.utils
+import mimetypes
+import os
+import socketserver
+import sys
+from urllib.parse import unquote
+
+import bproto
+from bproto import DATA, DATA_CHUNK, END_STREAM, GOAWAY, HEADERS, Frame
+
+SERVER_NAME = "bserve/1.0"
+UNKNOWN_TYPE = 0x7F
+REASONS = {
+    200: "OK",
+    400: "Bad Request",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    500: "Internal Server Error",
+}
+MIME_TYPES = mimetypes.MimeTypes()
+
+
+class BadRequest(Exception):
+    pass
+
+
+def parse_request(frame):
+    """Return (method, path) from a request HEADERS frame, or raise BadRequest."""
+    if frame.stream_id == 0:
+        raise BadRequest("HEADERS on stream 0")
+    try:
+        headers = bproto.decode_headers(frame.payload)
+    except bproto.MalformedHeaders as e:
+        raise BadRequest(str(e)) from None
+    pseudo = {}
+    for name, value in headers:
+        if not name.startswith(":"):
+            continue
+        if name not in (":method", ":path"):
+            raise BadRequest(f"{name} is not allowed in a request")
+        if name in pseudo:
+            raise BadRequest(f"{name} appears twice")
+        pseudo[name] = value
+    if len(pseudo) != 2:
+        raise BadRequest("a request needs both :method and :path")
+    if not pseudo[":path"].startswith("/"):
+        raise BadRequest(":path must start with /")
+    return pseudo[":method"], pseudo[":path"]
+
+
+def resolve(root, path):
+    """Map a request path to a regular file inside root, or return None."""
+    path = unquote(path.split("?", 1)[0])
+    if "\0" in path:
+        return None
+    full = os.path.realpath(os.path.join(root, path.lstrip("/")))
+    if os.path.isdir(full):
+        full = os.path.realpath(os.path.join(full, "index.html"))
+    if os.path.commonpath([root, full]) != root or not os.path.isfile(full):
+        return None
+    return full
+
+
+class Connection(socketserver.BaseRequestHandler):
+    """One client connection: answer requests until the client closes it."""
+
+    def handle(self):
+        try:
+            while True:
+                try:
+                    frame = bproto.read_frame(self.request)
+                except bproto.FrameTooLarge as e:
+                    self.fail(e.stream_id, "-", 400, str(e))
+                    self.send(Frame(GOAWAY, 0, 0, b"frame too large"))
+                    return
+                if frame is None or frame.type == GOAWAY:
+                    return
+                if frame.type == HEADERS:
+                    self.answer(frame)
+                # DATA from a client and frames of unknown type are read and dropped.
+        except (bproto.Truncated, OSError):
+            return
+
+    def answer(self, frame):
+        stream_id = frame.stream_id
+        try:
+            method, path = parse_request(frame)
+        except BadRequest as e:
+            return self.fail(stream_id, "-", 400, str(e))
+        request = f"{method} {path}"
+        if method != "GET":
+            return self.fail(stream_id, request, 405)
+        try:
+            full = resolve(self.server.root, path)
+            body = open(full, "rb") if full else None
+        except OSError:
+            body = None
+        except Exception as e:
+            return self.fail(stream_id, request, 500, repr(e))
+        if body is None:
+            return self.fail(stream_id, request, 404)
+        with body:
+            size = os.fstat(body.fileno()).st_size
+            content_type = MIME_TYPES.guess_type(full)[0] or "application/octet-stream"
+            self.log(stream_id, request, 200, f"{size} bytes")
+            self.send_head(stream_id, 200, content_type, size)
+            remaining = size
+            while remaining:
+                chunk = body.read(min(DATA_CHUNK, remaining))
+                if not chunk:
+                    raise OSError(f"{full} shrank while it was being sent")
+                remaining -= len(chunk)
+                self.send(Frame(DATA, 0 if remaining else END_STREAM, stream_id, chunk))
+
+    def send(self, frame):
+        self.request.sendall(bproto.encode_frame(frame))
+
+    def send_head(self, stream_id, status, content_type, length):
+        if self.server.inject_unknown:
+            self.send(Frame(UNKNOWN_TYPE, 0, stream_id, b"future"))
+        headers = [
+            (":status", str(status)),
+            ("content-type", content_type),
+            ("content-length", str(length)),
+            ("server", SERVER_NAME),
+            ("date", email.utils.formatdate(usegmt=True)),
+        ]
+        flags = END_STREAM if length == 0 else 0
+        self.send(Frame(HEADERS, flags, stream_id, bproto.encode_headers(headers)))
+
+    def fail(self, stream_id, request, status, detail=""):
+        self.log(stream_id, request, status, detail)
+        text = f"{status} {REASONS[status]}\n" + (f"{detail}\n" if detail else "")
+        body = text.encode()
+        self.send_head(stream_id, status, "text/plain; charset=utf-8", len(body))
+        self.send(Frame(DATA, END_STREAM, stream_id, body))
+
+    def log(self, stream_id, request, status, detail=""):
+        host, port = self.client_address[:2]
+        line = f"{host}:{port} stream={stream_id} {request} {status}"
+        if detail:
+            line += f" ({detail})"
+        print(line, file=sys.stderr, flush=True)
+
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, address, root, inject_unknown):
+        self.root = root
+        self.inject_unknown = inject_unknown
+        super().__init__(address, Connection)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="bserve", description="Serve a directory over BHTTP/1 (see SPEC.md).")
+    parser.add_argument("root", help="directory to serve")
+    parser.add_argument("port", type=int, help="TCP port to listen on; 0 picks a free one")
+    parser.add_argument("--bind", default="", metavar="ADDR", help="address to listen on (default: all interfaces)")
+    parser.add_argument(
+        "--inject-unknown",
+        action="store_true",
+        help="send a frame of unknown type 0x7f before every response, to check that clients skip it",
+    )
+    args = parser.parse_args()
+    root = os.path.realpath(args.root)
+    if not os.path.isdir(root):
+        parser.error(f"{args.root} is not a directory")
+    if not 0 <= args.port <= 0xFFFF:
+        parser.error(f"port {args.port} is out of range")
+    try:
+        server = Server((args.bind, args.port), root, args.inject_unknown)
+    except OSError as e:
+        sys.exit(f"bserve: cannot listen on port {args.port}: {e}")
+    with server:
+        host, port = server.server_address[:2]
+        print(f"bserve: serving {root} on {host}:{port}", file=sys.stderr, flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+
+
+if __name__ == "__main__":
+    main()
