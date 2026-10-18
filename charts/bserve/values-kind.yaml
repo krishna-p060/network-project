@@ -1,0 +1,9 @@
+# Local kind cluster: reachable on the host at localhost:9000 through deploy/kind-config.yaml.
+service:
+  type: NodePort
+  nodePort: 30900
+
+monitoring:
+  serviceMonitor: true
+  rules: true
+  dashboard: true

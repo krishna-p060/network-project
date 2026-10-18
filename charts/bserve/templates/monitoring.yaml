@@ -1,0 +1,86 @@
+{{- $name := include "bserve.fullname" . -}}
+{{- $sel := printf "namespace=\"%s\",service=\"%s-metrics\"" .Release.Namespace $name -}}
+{{- if .Values.monitoring.serviceMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "bserve.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "bserve.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: metrics
+  endpoints:
+    - port: metrics
+      interval: 15s
+{{- end }}
+{{- if .Values.monitoring.rules }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "bserve.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: bserve.slo
+      rules:
+        - record: bserve:error_ratio:rate5m
+          expr: |
+            sum(rate(bserve_requests_total{ {{- $sel }},status=~"5.."}[5m]))
+            / clamp_min(sum(rate(bserve_requests_total{ {{- $sel }}}[5m])), 1e-9)
+        - record: bserve:latency_p95:rate5m
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(bserve_request_duration_seconds_bucket{ {{- $sel }}}[5m])))
+        - alert: BserveErrorBudgetBurn
+          expr: bserve:error_ratio:rate5m > {{ mulf .Values.monitoring.errorBudget 10 }}
+          for: 5m
+          labels: {severity: page}
+          annotations:
+            summary: "bserve 5xx ratio {{`{{ $value | humanizePercentage }}`}} is burning the error budget 10x too fast"
+            runbook: "docs/RUNBOOK.md#high-error-rate"
+        - alert: BserveSlowResponses
+          expr: bserve:latency_p95:rate5m > {{ .Values.monitoring.latencyP95Seconds }}
+          for: 10m
+          labels: {severity: ticket}
+          annotations:
+            summary: "bserve p95 latency is {{`{{ $value | humanizeDuration }}`}}"
+            runbook: "docs/RUNBOOK.md#slow-responses"
+        - alert: BserveNoReadyPods
+          expr: kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}",deployment="{{ $name }}"} < 1
+          for: 1m
+          labels: {severity: page}
+          annotations:
+            summary: "No ready bserve pods: users cannot connect"
+            runbook: "docs/RUNBOOK.md#no-ready-pods"
+        - alert: BserveSmokeCheckFailing
+          expr: time() - kube_cronjob_status_last_successful_time{namespace="{{ .Release.Namespace }}",cronjob="{{ $name }}-smoke"} > 600
+          for: 1m
+          labels: {severity: page}
+          annotations:
+            summary: "The synthetic bcurl check has not succeeded for 10 minutes"
+            runbook: "docs/RUNBOOK.md#smoke-check-failing"
+        - alert: BserveMixedVersions
+          expr: count(count by (version) (bserve_build_info{ {{- $sel }}})) > 1
+          for: 15m
+          labels: {severity: ticket}
+          annotations:
+            summary: "More than one bserve version has been running for 15 minutes: a stuck rollout"
+            runbook: "docs/RUNBOOK.md#stuck-rollout"
+{{- end }}
+{{- if .Values.monitoring.dashboard }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-dashboard
+  labels:
+    {{- include "bserve.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  bserve.json: |-
+    {{- .Files.Get "dashboards/bserve.json" | replace "SELECTOR" ($sel | replace "\"" "\\\"") | nindent 4 }}
+{{- end }}

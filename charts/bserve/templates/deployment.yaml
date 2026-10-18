@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bserve.fullname" . }}
+  labels:
+    {{- include "bserve.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  minReadySeconds: {{ .Values.minReadySeconds }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.strategy.maxSurge }}
+      maxUnavailable: {{ .Values.strategy.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "bserve.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "bserve.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      serviceAccountName: {{ include "bserve.fullname" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- include "bserve.restrictedPod" . | nindent 8 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "bserve.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: server
+      containers:
+        - name: bserve
+          image: {{ include "bserve.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["/srv/www", "{{ .Values.service.port }}"]
+          env:
+            - name: BSERVE_DRAIN_SECONDS
+              value: {{ .Values.drainSeconds | quote }}
+          ports:
+            - name: bhttp
+              containerPort: {{ .Values.service.port }}
+            - name: metrics
+              containerPort: 9100
+          # Liveness: the BHTTP/1 listener still accepts connections.
+          livenessProbe:
+            tcpSocket:
+              port: bhttp
+            periodSeconds: 10
+            failureThreshold: 3
+          # Readiness: HTTP on the metrics port; goes 503 while draining after SIGTERM.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- include "bserve.restrictedContainer" . | nindent 12 }}
