@@ -1,0 +1,55 @@
+image:
+  repository: ghcr.io/krishna-p060/network-project
+  # Set to the git commit (short SHA) at deploy time; there is no "latest".
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+# Rolling update that never drops below replicaCount ready pods.
+strategy:
+  maxSurge: 1
+  maxUnavailable: 0
+minReadySeconds: 5
+revisionHistoryLimit: 5
+
+# Seconds bserve stays up but not-ready after SIGTERM, so the endpoint is removed first.
+drainSeconds: 5
+terminationGracePeriodSeconds: 30
+
+service:
+  # NodePort for kind; ClusterIP or LoadBalancer elsewhere. BHTTP/1 is not HTTP, so no Ingress.
+  type: ClusterIP
+  port: 9000
+  nodePort: null
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 48Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  # Namespace allowed to scrape /metrics on port 9100.
+  monitoringNamespace: monitoring
+
+# Runs bcurl against the Service on a schedule: a synthetic user journey.
+smoke:
+  enabled: true
+  schedule: "*/2 * * * *"
+  path: /hello.txt
+
+monitoring:
+  serviceMonitor: false
+  rules: false
+  dashboard: false
+  # Fraction of requests allowed to fail with 5xx (SLO 99.5%).
+  errorBudget: 0.005
+  latencyP95Seconds: 0.1

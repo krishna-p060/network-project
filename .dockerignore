@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+.DS_Store
+charts
+deploy
+docs
+Makefile
+*.md
+!SPEC.md

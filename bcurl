@@ -101,7 +101,7 @@ class Trace:
         print("\n".join(lines), file=sys.stderr, flush=True)
 
 
-def fetch(sock, stream_id, authority, path, out, trace):
+def fetch(sock, stream_id, authority, path, out, trace, request_id=None):
     """Send one GET on stream_id, copy the body to out, and return the status."""
     request = [
         (":method", "GET"),
@@ -110,6 +110,8 @@ def fetch(sock, stream_id, authority, path, out, trace):
         ("user-agent", USER_AGENT),
         ("accept", "*/*"),
     ]
+    if request_id:
+        request.append(("x-request-id", f"{request_id}-{stream_id}"))
     frame = Frame(HEADERS, END_STREAM, stream_id, bproto.encode_headers(request))
     trace.frame(">", frame, request)
     sock.sendall(bproto.encode_frame(frame))
@@ -159,6 +161,11 @@ def main(argv=None):
         description="Fetch files over BHTTP/1 (see SPEC.md). All URLs share one connection.",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="hexdump every frame sent and received to stderr")
+    parser.add_argument(
+        "--request-id",
+        metavar="ID",
+        help="send x-request-id ID-<stream> with each request so it can be found in the server logs",
+    )
     parser.add_argument("urls", nargs="+", metavar="host:port/path")
     args = parser.parse_args(argv)
     trace = Trace(args.verbose)
@@ -178,7 +185,7 @@ def main(argv=None):
         with sock:
             trace.note(f"connected to {host}:{port} ({sock.getpeername()[0]})")
             for stream_id, (_, _, authority, path) in enumerate(targets, start=1):
-                status = fetch(sock, stream_id, authority, path, out, trace)
+                status = fetch(sock, stream_id, authority, path, out, trace, args.request_id)
                 if status >= 400:
                     print(f"bcurl: {authority}{path}: {status}", file=sys.stderr)
                     worst = max(worst, status // 100)

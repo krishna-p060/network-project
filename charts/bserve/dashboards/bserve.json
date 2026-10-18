@@ -1,0 +1,67 @@
+{
+  "title": "bserve",
+  "uid": "bserve",
+  "schemaVersion": 39,
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Running version",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "count by (version) (bserve_build_info{SELECTOR})", "legendFormat": "{{version}}", "instant": true}],
+      "options": {"textMode": "name", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "stat",
+      "title": "Availability (non-5xx, 1h)",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "1 - (sum(increase(bserve_requests_total{SELECTOR,status=~\"5..\"}[1h])) or vector(0)) / clamp_min(sum(increase(bserve_requests_total{SELECTOR}[1h])), 1)"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 2, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0.995}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Open connections",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(bserve_connections_open{SELECTOR})"}]
+    },
+    {
+      "type": "stat",
+      "title": "Protocol errors (1h)",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(increase(bserve_protocol_errors_total{SELECTOR}[1h]))"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests per second by status",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (status) (rate(bserve_requests_total{SELECTOR}[1m]))", "legendFormat": "{{status}}"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Latency p50 / p95 / p99",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le) (rate(bserve_request_duration_seconds_bucket{SELECTOR}[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(bserve_request_duration_seconds_bucket{SELECTOR}[5m])))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(bserve_request_duration_seconds_bucket{SELECTOR}[5m])))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "5xx ratio vs error budget (0.5%)",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [{"expr": "sum(rate(bserve_requests_total{SELECTOR,status=~\"5..\"}[5m])) / clamp_min(sum(rate(bserve_requests_total{SELECTOR}[5m])), 1e-9)", "legendFormat": "5xx ratio"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Response bytes per second by pod",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (pod) (rate(bserve_response_bytes_total{SELECTOR}[1m]))", "legendFormat": "{{pod}}"}],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    }
+  ]
+}

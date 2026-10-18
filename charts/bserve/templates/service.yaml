@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bserve.fullname" . }}
+  labels:
+    {{- include "bserve.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "bserve.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  ports:
+    - name: bhttp
+      port: {{ .Values.service.port }}
+      targetPort: bhttp
+      protocol: TCP
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
+---
+# Metrics stay cluster-internal, on a separate ClusterIP Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bserve.fullname" . }}-metrics
+  labels:
+    {{- include "bserve.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "bserve.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics

@@ -1,0 +1,30 @@
+# kube-prometheus-stack for the local kind cluster.
+prometheus:
+  prometheusSpec:
+    # Pick up ServiceMonitors and PrometheusRules from every release, not only this chart's.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    retention: 2d
+    resources:
+      requests: {cpu: 100m, memory: 400Mi}
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+
+grafana:
+  admin:
+    # Created by `make monitoring` with a random password; never stored in the repo.
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  sidecar:
+    dashboards:
+      searchNamespace: ALL
+
+# Components kind does not expose to scraping.
+kubeEtcd: {enabled: false}
+kubeControllerManager: {enabled: false}
+kubeScheduler: {enabled: false}
+kubeProxy: {enabled: false}

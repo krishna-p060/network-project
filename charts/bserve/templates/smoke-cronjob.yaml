@@ -1,0 +1,39 @@
+{{- if .Values.smoke.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "bserve.fullname" . }}-smoke
+  labels:
+    {{- include "bserve.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke
+spec:
+  schedule: {{ .Values.smoke.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 60
+      template:
+        metadata:
+          labels:
+            {{- include "bserve.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: smoke
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            {{- include "bserve.restrictedPod" . | nindent 12 }}
+          containers:
+            - name: bcurl
+              image: {{ include "bserve.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "/app/bcurl", "--request-id", "smoke"]
+              args: ["{{ include "bserve.fullname" . }}:{{ .Values.service.port }}{{ .Values.smoke.path }}"]
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {cpu: 200m, memory: 64Mi}
+              securityContext:
+                {{- include "bserve.restrictedContainer" . | nindent 16 }}
+{{- end }}
