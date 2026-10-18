@@ -56,12 +56,16 @@ spec:
               port: bhttp
             periodSeconds: 10
             failureThreshold: 3
-          # Readiness: HTTP on the metrics port; goes 503 while draining after SIGTERM.
+          # Readiness: /readyz goes 503 while draining after SIGTERM. Checked from inside the
+          # container because the NetworkPolicy only admits the monitoring namespace on 9100.
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: metrics
+            exec:
+              command:
+                - python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/readyz', timeout=2)"
             periodSeconds: 5
+            timeoutSeconds: 3
             failureThreshold: 2
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

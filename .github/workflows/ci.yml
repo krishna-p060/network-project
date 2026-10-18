@@ -115,6 +115,16 @@ jobs:
           helm -n bhttp rollback bserve --wait
           helm -n bhttp history bserve
           ./bcurl -v localhost:9000/hello.txt 2>&1 >/dev/null | grep "x-version: $VERSION"
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl -n bhttp get pods -o wide || true
+          kubectl -n bhttp describe pods -l app.kubernetes.io/component=server || true
+          kubectl -n bhttp get events --sort-by=.lastTimestamp || true
+          kubectl -n bhttp logs -l app.kubernetes.io/component=server --prefix --tail=20 || true
+          echo "::error title=pods::$(kubectl -n bhttp get pods -o wide 2>&1 | tr '\n' '|')"
+          echo "::error title=events::$(kubectl -n bhttp get events --sort-by=.lastTimestamp 2>&1 | tail -15 | tr '\n' '|')"
+          echo "::error title=replicasets::$(kubectl -n bhttp get rs,deploy -o wide 2>&1 | tr '\n' '|')"
       - name: Summary
         if: always()
         run: |

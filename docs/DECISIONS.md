@@ -28,7 +28,7 @@ A request from `bcurl` on the laptop goes to `localhost:9000`, which kind maps t
 
 **No Ingress.** Ingress controllers route HTTP, and BHTTP/1 is a binary TCP protocol, so the Service is exposed directly (NodePort on kind, LoadBalancer on a cloud). Load balancing is per connection, not per request: one client with one long connection always hits one pod. This is fine for many short-lived clients; a protocol-aware proxy would be needed to balance individual requests.
 
-**Probes.** Liveness is a TCP check on 9000: it restarts a pod whose listener is gone, without depending on the metrics thread. Readiness is HTTP `/readyz` on 9100, which turns 503 the moment SIGTERM arrives. An exec probe running `bcurl` would test the real protocol, but would start a Python process every few seconds; the end-to-end protocol check is the smoke CronJob instead.
+**Probes.** Liveness is a TCP check on 9000: it restarts a pod whose listener is gone, without depending on the metrics thread. Readiness is `/readyz` on 9100, which turns 503 the moment SIGTERM arrives. It runs as an exec probe calling `127.0.0.1:9100` from inside the container: as an `httpGet` probe the kubelet's request came from the node, which the NetworkPolicy (9100 only from `monitoring`) blocked, so pods never became ready. The cost is a short Python process every 5 seconds. An exec probe running `bcurl` would test the real protocol but cost the same; the end-to-end protocol check is the smoke CronJob instead.
 
 **Graceful shutdown.** The baseline only stopped on Ctrl+C. On SIGTERM bserve now reports not-ready, keeps serving for `drainSeconds` (5 s) while Kubernetes removes it from the Service endpoints, and then exits. Without this, a rolling update refuses connections that arrive in that gap.
 
